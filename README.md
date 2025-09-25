@@ -1,1 +1,1 @@
-# P2P-com-Balanceamento-de-Carga-Din-mico
+# P2P-com-Balanceamento-de-Carga-Dinâmico
