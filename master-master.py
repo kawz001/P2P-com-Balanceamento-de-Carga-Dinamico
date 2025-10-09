@@ -83,17 +83,18 @@ class MasterCoordinator:
 
 
 if __name__ == "__main__":
-    host = "10.62.217.22"
+    host = "10.62.217.209"
     port = 5000
 
 
     master = MasterCoordinator(host, port)
 
     # exemplo de vizinhos (ajuste as portas conforme seu setup)
-    master.add_neighbor("10.62.217.209", 5000)
-    master.add_neighbor("10.62.217.203", 5000)
+    #master.add_neighbor("10.62.217.203", 5000)
     master.add_neighbor("10.62.217.16", 5000)
     master.add_neighbor("10.62.217.199", 8765)
+    master.add_neighbor("10.62.217.212 ", 5900)
+    
 
     try:
         hbeat_send = threading.Thread(target=master.send_heartbeat, daemon=True, args=())
