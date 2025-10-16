@@ -74,12 +74,16 @@ class Worker:
 
         # --- Redirecionamento de Master ---
         if task_type == "REDIRECT":
-            new_master = message.get("MASTER_REDIRECT")
-            print(f"[Worker] 🔄 Recebeu redirecionamento → Novo Master: {new_master}")
+            new_master_host = message.get("MASTER_REDIRECT")
+            new_master_port = message.get("MASTER_REDIRECT_PORT")
+
+            print(f"[Worker] 🔄 Recebeu redirecionamento → Novo Master: {new_master_host}:{new_master_port}")
             self.disconnect()
-            self.master_host = new_master
-            print(f"[Worker] Reconectando ao novo Master {new_master}...")
+            self.master_host = new_master_host
+            self.master_port = new_master_port
+            print(f"[Worker] Reconectando ao novo Master {new_master_host}:{new_master_port}...")
             self.connect_to_master()
+
 
         # --- Mensagem de confirmação ---
         elif task_type == "ASSIGN_MASTER":
