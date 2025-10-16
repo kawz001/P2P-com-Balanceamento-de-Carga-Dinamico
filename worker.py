@@ -125,6 +125,8 @@ class Worker:
         time.sleep(task.get("workload", 3))
         print(f"[Worker] ✅ Tarefa {task['task_id']} concluída.")
         self.active_tasks -= 1
+        if self.task_queue.all_tasks_done:
+            print("Todas as tarefas foram concluídas.")
 
         # Notifica o Master
         self.send_message({
