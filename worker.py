@@ -169,7 +169,7 @@ if __name__ == "__main__":
     worker = Worker(
         host="10.62.217.209",
         port=5070,
-        master_host="10.62.217.209",
+        master_host="10.62.217.22",
         master_port=5000
     )
 
