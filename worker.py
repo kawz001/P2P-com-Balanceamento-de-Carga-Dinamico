@@ -70,33 +70,54 @@ class Worker:
                 self.reconnect()
 
     def handle_message(self, message):
-        """Processa mensagens recebidas"""
+        """Processa mensagens recebidas do Master"""
         task_type = message.get("TASK")
 
+        # --- Redirecionamento de Master ---
         if task_type == "REDIRECT":
             new_master = message.get("MASTER_REDIRECT")
-            print(f"[Worker] Recebeu redirecionamento para Master {new_master}")
+            print(f"[Worker] 🔄 Recebeu instrução de redirecionamento → Novo Master: {new_master}")
             self.disconnect()
             self.master_host = new_master
+            print(f"[Worker] Reconectando ao novo Master {new_master}...")
             self.connect_to_master()
 
+        # --- Mensagem de confirmação do Master ---
+        elif task_type == "ASSIGN_MASTER":
+            msg = message.get("MESSAGE", "")
+            print(f"[Worker] 📩 Mensagem do Master: {msg}")
+
+        # --- Nova tarefa recebida ---
         elif message.get("type") == "new_task":
             task = message["task"]
             if self.active_tasks < self.max_tasks:
                 threading.Thread(target=self.process_task, args=(task,), daemon=True).start()
             else:
-                print(f"[Worker] Capacidade máxima atingida. Rejeitando tarefa {task['task_id']}")
+                print(f"[Worker] 🚫 Capacidade máxima atingida. Rejeitando tarefa {task['task_id']}")
+
+        # --- Heartbeat, se houver ---
+        elif task_type == "HEARTBEAT":
+            response = {
+                "SERVER_ID": self.port,
+                "TASK": "HEARTBEAT",
+                "RESPONSE": "ALIVE"
+            }
+            self.send_message(response)
+
+        # --- Outras mensagens (debug) ---
+        else:
+            print(f"[Worker] Mensagem desconhecida recebida: {message}")
 
     # ---------------------------
     # PROCESSAMENTO DE TASKS
     # ---------------------------
 
     def process_task(self, task):
-        """Executa tarefa simulada"""
+        """Executa uma tarefa simulada"""
         self.active_tasks += 1
-        print(f"[Worker] Iniciando tarefa {task['task_id']} ({self.active_tasks}/{self.max_tasks})")
+        print(f"[Worker] 🧩 Iniciando tarefa {task['task_id']} ({self.active_tasks}/{self.max_tasks})")
         time.sleep(task.get("workload", 3))
-        print(f"[Worker] Concluiu tarefa {task['task_id']}")
+        print(f"[Worker] ✅ Concluiu tarefa {task['task_id']}")
         self.active_tasks -= 1
 
         self.send_message({
