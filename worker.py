@@ -19,10 +19,9 @@ class Worker:
         self.max_tasks = 2
         print(f"[Worker] Iniciado {self.worker_uuid[:8]} em {self.host}:{self.port}")
 
-    # ---------------------------
-    # CONEXÃO E REGISTRO
-    # ---------------------------
-
+    # --------------------------------
+    # CONEXÃO COM MASTER
+    # --------------------------------
     def connect_to_master(self):
         """Conecta-se ao Master e registra"""
         while not self.is_connected:
@@ -33,6 +32,7 @@ class Worker:
                 print(f"[Worker] Conectado ao Master {self.master_host}:{self.master_port}")
                 self.register_to_master()
                 threading.Thread(target=self.listen_for_messages, daemon=True).start()
+                threading.Thread(target=self.task_scheduler, daemon=True).start()
             except Exception as e:
                 print(f"[Worker] Falha ao conectar: {e}. Tentando novamente em 5s...")
                 time.sleep(5)
@@ -48,10 +48,9 @@ class Worker:
         self.send_message(payload)
         print(f"[Worker] Registrado no Master {self.master_host}:{self.master_port}")
 
-    # ---------------------------
-    # RECEBIMENTO E REDIRECIONAMENTO
-    # ---------------------------
-
+    # --------------------------------
+    # RECEBIMENTO DE MENSAGENS
+    # --------------------------------
     def listen_for_messages(self):
         """Escuta mensagens vindas do Master"""
         while self.is_connected:
@@ -76,13 +75,13 @@ class Worker:
         # --- Redirecionamento de Master ---
         if task_type == "REDIRECT":
             new_master = message.get("MASTER_REDIRECT")
-            print(f"[Worker] 🔄 Recebeu instrução de redirecionamento → Novo Master: {new_master}")
+            print(f"[Worker] 🔄 Recebeu redirecionamento → Novo Master: {new_master}")
             self.disconnect()
             self.master_host = new_master
             print(f"[Worker] Reconectando ao novo Master {new_master}...")
             self.connect_to_master()
 
-        # --- Mensagem de confirmação do Master ---
+        # --- Mensagem de confirmação ---
         elif task_type == "ASSIGN_MASTER":
             msg = message.get("MESSAGE", "")
             print(f"[Worker] 📩 Mensagem do Master: {msg}")
@@ -90,12 +89,10 @@ class Worker:
         # --- Nova tarefa recebida ---
         elif message.get("type") == "new_task":
             task = message["task"]
-            if self.active_tasks < self.max_tasks:
-                threading.Thread(target=self.process_task, args=(task,), daemon=True).start()
-            else:
-                print(f"[Worker] 🚫 Capacidade máxima atingida. Rejeitando tarefa {task['task_id']}")
+            print(f"[Worker] 📦 Recebeu nova tarefa {task['task_id']}")
+            self.task_queue.put(task)
 
-        # --- Heartbeat, se houver ---
+        # --- Heartbeat ---
         elif task_type == "HEARTBEAT":
             response = {
                 "SERVER_ID": self.port,
@@ -104,32 +101,41 @@ class Worker:
             }
             self.send_message(response)
 
-        # --- Outras mensagens (debug) ---
         else:
             print(f"[Worker] Mensagem desconhecida recebida: {message}")
 
-    # ---------------------------
-    # PROCESSAMENTO DE TASKS
-    # ---------------------------
+    # --------------------------------
+    # AGENDADOR DE TAREFAS
+    # --------------------------------
+    def task_scheduler(self):
+        """Monitora a fila e executa tarefas disponíveis"""
+        while True:
+            if not self.task_queue.empty() and self.active_tasks < self.max_tasks:
+                task = self.task_queue.get()
+                threading.Thread(target=self.process_task, args=(task,), daemon=True).start()
+            time.sleep(0.5)
 
+    # --------------------------------
+    # PROCESSAMENTO DE TAREFAS
+    # --------------------------------
     def process_task(self, task):
         """Executa uma tarefa simulada"""
         self.active_tasks += 1
         print(f"[Worker] 🧩 Iniciando tarefa {task['task_id']} ({self.active_tasks}/{self.max_tasks})")
         time.sleep(task.get("workload", 3))
-        print(f"[Worker] ✅ Concluiu tarefa {task['task_id']}")
+        print(f"[Worker] ✅ Tarefa {task['task_id']} concluída.")
         self.active_tasks -= 1
 
+        # Notifica o Master
         self.send_message({
             "type": "task_completed",
             "task_id": task["task_id"],
             "worker_uuid": self.worker_uuid
         })
 
-    # ---------------------------
-    # CONEXÃO E COMUNICAÇÃO
-    # ---------------------------
-
+    # --------------------------------
+    # ENVIO E CONEXÃO
+    # --------------------------------
     def send_message(self, message):
         """Envia mensagens ao Master"""
         if self.is_connected:
@@ -156,14 +162,14 @@ class Worker:
         time.sleep(5)
         self.connect_to_master()
 
-# ---------------------------
+# --------------------------------
 # EXECUÇÃO
-# ---------------------------
+# --------------------------------
 if __name__ == "__main__":
     worker = Worker(
         host="10.62.217.209",
         port=5070,
-        master_host="10.62.217.22",
+        master_host="10.62.217.209",
         master_port=5000
     )
 
