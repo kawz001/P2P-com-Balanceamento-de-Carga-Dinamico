@@ -149,7 +149,10 @@ class MasterCoordinator:
     # SUPORTE ENTRE MASTERS
     # ----------------------------------------
     def handle_worker_request(self, client_socket, message):
+        requester_master_id = message.get("MASTER")
+        requester_host, requester_port = client_socket.getpeername()  # Pega IP e porta de quem pediu
         available_workers = [w for w, info in self.workers.items() if info["status"] == "idle"]
+
         if available_workers:
             response = {
                 "MASTER": self.server_id,
@@ -157,16 +160,16 @@ class MasterCoordinator:
                 "WORKERS": [{"WORKER_UUID": w} for w in available_workers]
             }
             client_socket.sendall(json.dumps(response).encode("utf-8"))
-            print(f"[SUPORTE] Enviando resposta positiva com {len(available_workers)} workers.")
+            print(f"[SUPORTE] Enviando resposta positiva com {len(available_workers)} workers para {requester_host}:{requester_port}.")
 
-            # exemplo fixo: envia para o primeiro vizinho (pode ser configurado)
+            # Agora o redirecionamento é dinâmico — volta para o Master que pediu
             for w in available_workers:
-                self.redirect_worker_to_master(w, "10.62.217.16", 5000)
+                self.redirect_worker_to_master(w, requester_host, requester_port)
 
         else:
             response = {"MASTER": self.server_id, "RESPONSE": "UNAVAILABLE"}
             client_socket.sendall(json.dumps(response).encode("utf-8"))
-            print("[SUPORTE] Resposta negativa - sem workers disponíveis.")
+            print(f"[SUPORTE] Resposta negativa para {requester_master_id} - sem workers disponíveis.")
 
     def redirect_worker_to_master(self, worker_uuid, target_master_host, target_master_port):
         """Envia comando real de redirecionamento ao Worker"""
