@@ -16,7 +16,7 @@ class MasterCoordinator:
         self.socket_server.listen(5)
 
         # controle de tasks e workers
-        self.pending_tasks = 20
+        self.pending_tasks = 10
         self.threshold = 10
         self.workers = {}  # {uuid: {"status": "idle", "socket": socket}}
 
@@ -119,7 +119,7 @@ class MasterCoordinator:
     def simulate_task_generation(self):
         """Simula chegada de tarefas e detecção de saturação"""
         while True:
-            time.sleep(random.randint(3, 6))
+            time.sleep(random.randint(3, 10))
             print(f"[Load] Tasks pendentes: {self.pending_tasks}")
             if self.pending_tasks >= self.threshold:
                 print("[ALERTA] Saturação detectada. Solicitando suporte...")
@@ -227,11 +227,11 @@ class MasterCoordinator:
 # EXECUÇÃO
 # ----------------------------------------
 if __name__ == "__main__":
-    host = "10.62.217.207"
+    host = "10.62.218.29"
     port = 5000
 
     master = MasterCoordinator(host, port)
-    master.add_neighbor("10.62.217.22", 5000)
+    master.add_neighbor("10.62.218.16", 5000)
 
     threading.Thread(target=master.send_heartbeat, daemon=True).start()
     threading.Thread(target=master.simulate_task_generation, daemon=True).start()
