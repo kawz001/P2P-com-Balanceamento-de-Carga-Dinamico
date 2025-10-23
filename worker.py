@@ -19,11 +19,7 @@ class Worker:
         self.max_tasks = 2
         print(f"[Worker] Iniciado {self.worker_uuid[:8]} em {self.host}:{self.port}")
 
-    # --------------------------------
-    # CONEXÃO COM MASTER
-    # --------------------------------
     def connect_to_master(self):
-        """Conecta-se ao Master e registra"""
         while not self.is_connected:
             try:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -38,7 +34,6 @@ class Worker:
                 time.sleep(5)
 
     def register_to_master(self):
-        """Envia payload de registro ao Master"""
         payload = {
             "MASTER": self.master_host,
             "MASTER_ORIGIN": self.master_host,
@@ -46,13 +41,8 @@ class Worker:
             "WORKER_UUID": self.worker_uuid
         }
         self.send_message(payload)
-        print(f"[Worker] Registrado no Master {self.master_host}:{self.master_port}")
 
-    # --------------------------------
-    # RECEBIMENTO DE MENSAGENS
-    # --------------------------------
     def listen_for_messages(self):
-        """Escuta mensagens vindas do Master"""
         while self.is_connected:
             try:
                 data = self.socket.recv(4096)
@@ -60,90 +50,58 @@ class Worker:
                     print("[Worker] Conexão perdida com Master.")
                     self.reconnect()
                     break
-
                 message = json.loads(data.decode("utf-8"))
                 self.handle_message(message)
-
             except Exception as e:
                 print(f"[Worker] Erro ao receber dados: {e}")
                 self.reconnect()
 
     def handle_message(self, message):
-        """Processa mensagens recebidas do Master"""
         task_type = message.get("TASK")
 
-        # --- Redirecionamento de Master ---
         if task_type == "REDIRECT":
             new_master_host = message.get("MASTER_REDIRECT")
             new_master_port = message.get("MASTER_REDIRECT_PORT")
-
-            print(f"[Worker] 🔄 Recebeu redirecionamento → Novo Master: {new_master_host}:{new_master_port}")
+            print(f"[Worker] 🔄 Redirecionado → {new_master_host}:{new_master_port}")
             self.disconnect()
             self.master_host = new_master_host
             self.master_port = new_master_port
-            print(f"[Worker] Reconectando ao novo Master {new_master_host}:{new_master_port}...")
             self.connect_to_master()
 
-
-        # --- Mensagem de confirmação ---
         elif task_type == "ASSIGN_MASTER":
-            msg = message.get("MESSAGE", "")
-            print(f"[Worker] 📩 Mensagem do Master: {msg}")
+            print(f"[Worker] 📩 {message.get('MESSAGE','')}")
 
-        # --- Nova tarefa recebida ---
         elif message.get("type") == "new_task":
             task = message["task"]
-            print(f"[Worker] 📦 Recebeu nova tarefa {task['task_id']}")
+            print(f"[Worker] 📦 Nova tarefa {task['task_id']}")
             self.task_queue.put(task)
 
-        # --- Heartbeat ---
         elif task_type == "HEARTBEAT":
-            response = {
-                "SERVER_ID": self.port,
-                "TASK": "HEARTBEAT",
-                "RESPONSE": "ALIVE"
-            }
+            response = {"SERVER_ID": self.port, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}
             self.send_message(response)
-
         else:
-            print(f"[Worker] Mensagem desconhecida recebida: {message}")
+            print(f"[Worker] Mensagem desconhecida: {message}")
 
-    # --------------------------------
-    # AGENDADOR DE TAREFAS
-    # --------------------------------
     def task_scheduler(self):
-        """Monitora a fila e executa tarefas disponíveis"""
         while True:
             if not self.task_queue.empty() and self.active_tasks < self.max_tasks:
                 task = self.task_queue.get()
                 threading.Thread(target=self.process_task, args=(task,), daemon=True).start()
             time.sleep(0.5)
 
-    # --------------------------------
-    # PROCESSAMENTO DE TAREFAS
-    # --------------------------------
     def process_task(self, task):
-        """Executa uma tarefa simulada"""
         self.active_tasks += 1
-        print(f"[Worker] 🧩 Iniciando tarefa {task['task_id']} ({self.active_tasks}/{self.max_tasks})")
+        print(f"[Worker] 🧩 Executando tarefa {task['task_id']}")
         time.sleep(task.get("workload", 3))
         print(f"[Worker] ✅ Tarefa {task['task_id']} concluída.")
         self.active_tasks -= 1
-        if self.task_queue.all_tasks_done:
-            print("Todas as tarefas foram concluídas.")
-
-        # Notifica o Master
         self.send_message({
             "type": "task_completed",
             "task_id": task["task_id"],
             "worker_uuid": self.worker_uuid
         })
 
-    # --------------------------------
-    # ENVIO E CONEXÃO
-    # --------------------------------
     def send_message(self, message):
-        """Envia mensagens ao Master"""
         if self.is_connected:
             try:
                 self.socket.sendall(json.dumps(message).encode("utf-8"))
@@ -152,7 +110,6 @@ class Worker:
                 self.reconnect()
 
     def disconnect(self):
-        """Fecha conexão"""
         try:
             if self.socket:
                 self.socket.close()
@@ -162,24 +119,18 @@ class Worker:
         print("[Worker] Desconectado do Master.")
 
     def reconnect(self):
-        """Tenta reconectar ao Master"""
         self.disconnect()
         print("[Worker] Tentando reconectar...")
         time.sleep(5)
         self.connect_to_master()
 
-# --------------------------------
-# EXECUÇÃO
-# --------------------------------
 if __name__ == "__main__":
     worker = Worker(
-        host="10.62.217.209",
+        host="10.62.217.22",
         port=5070,
-        master_host="10.62.217.22",
+        master_host="10.62.217.207",
         master_port=5000
     )
-
     worker.connect_to_master()
-
     while True:
         time.sleep(1)
