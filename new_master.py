@@ -9,13 +9,13 @@ class MasterCoordinator:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.server_id = "4"
+        self.server_id = "Thiago"
         self.neighbors = []  # (host, port)
         self.socket_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket_server.bind((self.host, self.port))
         self.socket_server.listen(5)
 
-        self.pending_tasks = 15
+        self.pending_tasks = 20
         self.threshold = 10
         self.workers = {}  # {uuid: {"status": "idle", "socket": socket}}
 
@@ -208,6 +208,7 @@ if __name__ == "__main__":
 
     master = MasterCoordinator(host, port)
     master.add_neighbor("10.62.217.11", 5000)
+    #master.add_neighbor("10.62.217.207", 5000)
 
     threading.Thread(target=master.send_heartbeat, daemon=True).start()
     threading.Thread(target=master.simulate_task_generation, daemon=True).start()
