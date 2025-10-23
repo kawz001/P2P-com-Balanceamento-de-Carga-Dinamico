@@ -11,7 +11,7 @@ class Worker:
         self.port = port
         self.master_host = master_host
         self.master_port = master_port
-        self.worker_uuid = str(uuid.uuid4())
+        self.worker_uuid = "Worker Kawezao"
         self.is_connected = False
         self.socket = None
         self.task_queue = Queue()
