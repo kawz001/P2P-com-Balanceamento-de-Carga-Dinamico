@@ -9,7 +9,7 @@ class MasterCoordinator:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.server_id = "4B"
+        self.server_id = "4"
         self.neighbors = []  # (host, port)
         self.socket_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket_server.bind((self.host, self.port))
@@ -103,6 +103,7 @@ class MasterCoordinator:
     def simulate_task_generation(self):
         while True:
             time.sleep(random.randint(3, 10))
+            self.pending_tasks += 1
             print(f"[Load] Tasks pendentes: {self.pending_tasks}")
             if self.pending_tasks >= self.threshold:
                 print("[ALERTA] Saturação detectada. Solicitando suporte...")
@@ -206,7 +207,7 @@ if __name__ == "__main__":
     port = 5000
 
     master = MasterCoordinator(host, port)
-    master.add_neighbor("10.62.217.207", 5000)
+    master.add_neighbor("10.62.217.11", 5000)
 
     threading.Thread(target=master.send_heartbeat, daemon=True).start()
     threading.Thread(target=master.simulate_task_generation, daemon=True).start()
