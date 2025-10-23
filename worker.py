@@ -128,7 +128,7 @@ if __name__ == "__main__":
     worker = Worker(
         host="10.62.217.22",
         port=5070,
-        master_host="10.62.217.207",
+        master_host="10.62.217.11",
         master_port=5000
     )
     worker.connect_to_master()
