@@ -103,7 +103,7 @@ class MasterCoordinator:
     def simulate_task_generation(self):
         while True:
             time.sleep(random.randint(3, 10))
-            self.pending_tasks += 2
+            self.pending_tasks += 1
             print(f"[Load] Tasks pendentes: {self.pending_tasks}")
             if self.pending_tasks >= self.threshold:
                 print("[ALERTA] Saturação detectada. Solicitando suporte...")
