@@ -4,6 +4,15 @@ import json
 import time
 import uuid
 import random
+import logging
+
+# --------------------------- CONFIGURAÇÃO DE LOG ---------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("MasterCoordinator")
 
 class MasterCoordinator:
     def __init__(self, host, port):
@@ -17,12 +26,11 @@ class MasterCoordinator:
 
         self.pending_tasks = 20
         self.threshold = 10
-        self.workers = {}  # {uuid: {"status": "idle"|"busy", "socket": socket}}
+        self.workers = {}  # {uuid: {"status": "idle", "socket": socket}}
 
-        print(f"[Coordinator] Master {self.server_id[:8]} pronto em {self.host}:{self.port}")
+        logger.info(f"Master {self.server_id[:8]} pronto em {self.host}:{self.port}")
         threading.Thread(target=self.listen_for_masters, daemon=True).start()
 
-    # -----------------------------------------------------------
     def add_neighbor(self, neighbor_host, neighbor_port):
         self.neighbors.append((neighbor_host, neighbor_port))
 
@@ -40,7 +48,7 @@ class MasterCoordinator:
                 message = json.loads(data.decode("utf-8"))
                 task = message.get("TASK")
 
-                print(f"[Coordinator] Mensagem recebida: {message}")
+                logger.info(f"Mensagem recebida: {message}")
 
                 if task == "HEARTBEAT":
                     response = {"SERVER_ID": self.server_id, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}
@@ -58,7 +66,7 @@ class MasterCoordinator:
                 elif message.get("WORKER") == "ALIVE":
                     worker_uuid = message.get("WORKER_UUID")
                     self.workers[worker_uuid] = {"status": "idle", "socket": client_socket}
-                    print(f"[Coordinator] Novo Worker {worker_uuid} conectado.")
+                    logger.info(f"Novo Worker {worker_uuid} conectado.")
                     self.confirm_worker_assignment(client_socket, worker_uuid)
                     self.send_task_to_worker(client_socket, worker_uuid)
 
@@ -71,17 +79,16 @@ class MasterCoordinator:
                     if worker_uuid in self.workers:
                         self.workers[worker_uuid]["status"] = "idle"
 
-                    print(f"[Coordinator] ✅ Worker {worker_uuid} concluiu a tarefa {task_id}. Pendentes: {self.pending_tasks}")
+                    logger.info(f"✅ Worker {worker_uuid} concluiu a tarefa {task_id}. Pendentes: {self.pending_tasks}")
 
                     if self.pending_tasks > 0:
                         self.send_task_to_worker(client_socket, worker_uuid)
 
         except Exception as e:
-            print(f"[Coordinator] Erro na conexão: {e}")
+            logger.error(f"Erro na conexão: {e}")
         finally:
             client_socket.close()
 
-    # -----------------------------------------------------------
     def send_heartbeat(self):
         while True:
             for neighbor_host, neighbor_port in self.neighbors:
@@ -93,20 +100,19 @@ class MasterCoordinator:
                     s.sendall(json.dumps(msg).encode("utf-8"))
                     response = s.recv(1024)
                     if response:
-                        print(f"[Coordinator] Resposta de {neighbor_host}:{neighbor_port} → {response.decode()}")
+                        logger.info(f"Resposta de {neighbor_host}:{neighbor_port} → {response.decode()}")
                     s.close()
                 except Exception as e:
-                    print(f"[Coordinator] Falha ao enviar HEARTBEAT → {e}")
+                    logger.warning(f"Falha ao enviar HEARTBEAT → {e}")
             time.sleep(5)
 
-    # -----------------------------------------------------------
     def simulate_task_generation(self):
         while True:
             time.sleep(random.randint(3, 10))
             self.pending_tasks += 1
-            print(f"[Load] Tasks pendentes: {self.pending_tasks}")
+            logger.info(f"Tasks pendentes: {self.pending_tasks}")
             if self.pending_tasks >= self.threshold:
-                print("[ALERTA] Saturação detectada. Solicitando suporte...")
+                logger.warning("Saturação detectada. Solicitando suporte...")
                 threading.Thread(target=self.request_support_from_neighbors, daemon=True).start()
 
     def request_support_from_neighbors(self):
@@ -121,7 +127,7 @@ class MasterCoordinator:
                     message = json.loads(response.decode("utf-8"))
                     if message.get("RESPONSE") == "AVAILABLE":
                         workers = message.get("WORKERS", [])
-                        print(f"[SUPORTE] {len(workers)} worker(s) disponíveis em {neighbor_host}")
+                        logger.info(f"{len(workers)} workers disponíveis em {neighbor_host}")
 
                         confirm_payload = {
                             "TASK": "REDIRECT_CONFIRM",
@@ -134,30 +140,27 @@ class MasterCoordinator:
                         s2.sendall(json.dumps(confirm_payload).encode("utf-8"))
                         s2.close()
                     else:
-                        print(f"[SUPORTE] Master {neighbor_host} sem workers disponíveis.")
+                        logger.info(f"Master {neighbor_host} sem workers disponíveis.")
                 s.close()
             except Exception as e:
-                print(f"[SUPORTE] Erro ao contatar {neighbor_host}:{neighbor_port} → {e}")
+                logger.error(f"Erro ao contatar {neighbor_host}:{neighbor_port} → {e}")
 
-    # -----------------------------------------------------------
     def handle_worker_request(self, client_socket, message):
         requester_master_id = message.get("MASTER")
-        requester_host, requester_port = client_socket.getpeername()
         available_workers = [w for w, info in self.workers.items() if info["status"] == "idle"]
 
-        if len(available_workers) > 1:  # ✅ só doa se tiver mais de um worker livre
-            selected_worker = random.choice(available_workers)
+        if available_workers:
             response = {
                 "MASTER": self.server_id,
                 "RESPONSE": "AVAILABLE",
-                "WORKERS": [{"WORKER_UUID": selected_worker}]
+                "WORKERS": [{"WORKER_UUID": w} for w in available_workers]
             }
             client_socket.sendall(json.dumps(response).encode("utf-8"))
-            print(f"[SUPORTE] Oferecendo 1 worker ({selected_worker}) para {requester_master_id}.")
+            logger.info(f"Há {len(available_workers)} workers disponíveis. Aguardando confirmação.")
         else:
             response = {"MASTER": self.server_id, "RESPONSE": "UNAVAILABLE"}
             client_socket.sendall(json.dumps(response).encode("utf-8"))
-            print(f"[SUPORTE] Nenhum worker extra disponível para {requester_master_id}.")
+            logger.info(f"Nenhum worker disponível para {requester_master_id}.")
 
     def handle_redirect_confirm(self, message):
         workers = message.get("WORKERS", [])
@@ -167,30 +170,25 @@ class MasterCoordinator:
         for w_info in workers:
             worker_uuid = w_info.get("WORKER_UUID")
             self.redirect_worker_to_master(worker_uuid, target_host, target_port)
-            # ✅ Remove o worker localmente após redirecionar
-            if worker_uuid in self.workers:
-                del self.workers[worker_uuid]
-                print(f"[BALANCEAMENTO] Worker {worker_uuid} transferido. Restam {len(self.workers)} no Master.")
 
     def redirect_worker_to_master(self, worker_uuid, target_master_host, target_master_port):
         if worker_uuid not in self.workers:
-            print(f"[REDIRECIONAMENTO] Worker {worker_uuid} não encontrado.")
+            logger.warning(f"Worker {worker_uuid} não encontrado.")
             return
         payload = {"TASK": "REDIRECT", "MASTER_REDIRECT": target_master_host, "MASTER_REDIRECT_PORT": target_master_port}
         try:
             worker_socket = self.workers[worker_uuid]["socket"]
             worker_socket.sendall(json.dumps(payload).encode("utf-8"))
-            print(f"[REDIRECIONAMENTO] Worker {worker_uuid} → {target_master_host}:{target_master_port}")
+            logger.info(f"Worker {worker_uuid} redirecionado → {target_master_host}:{target_master_port}")
         except Exception as e:
-            print(f"[REDIRECIONAMENTO] Falha ao redirecionar {worker_uuid}: {e}")
+            logger.error(f"Falha ao redirecionar {worker_uuid}: {e}")
 
-    # -----------------------------------------------------------
     def confirm_worker_assignment(self, client_socket, worker_uuid):
         message = {"TASK": "ASSIGN_MASTER", "MESSAGE": f"Agora você pertence ao Master {self.server_id[:8]}"}
         try:
             client_socket.sendall(json.dumps(message).encode("utf-8"))
         except Exception as e:
-            print(f"[Coordinator] Erro ao confirmar Worker {worker_uuid}: {e}")
+            logger.error(f"Erro ao confirmar Worker {worker_uuid}: {e}")
 
     def send_task_to_worker(self, client_socket, worker_uuid):
         if self.pending_tasks <= 0:
@@ -201,18 +199,15 @@ class MasterCoordinator:
             self.pending_tasks -= 1
             self.workers[worker_uuid]["status"] = "busy"
             client_socket.sendall(json.dumps(message).encode("utf-8"))
-            print(f"[Coordinator] 🧩 Enviada task {task['task_id']} ao Worker {worker_uuid}. Pendentes: {self.pending_tasks}")
+            logger.info(f"🧩 Enviada task {task['task_id']} ao Worker {worker_uuid}. Pendentes: {self.pending_tasks}")
         except Exception as e:
-            print(f"[Coordinator] Erro ao enviar task: {e}")
+            logger.error(f"Erro ao enviar task: {e}")
 
-# -----------------------------------------------------------
 if __name__ == "__main__":
     host = "10.62.217.209"
     port = 5000
-
     master = MasterCoordinator(host, port)
     master.add_neighbor("10.62.217.11", 5000)
-    # master.add_neighbor("10.62.217.207", 5000)
 
     threading.Thread(target=master.send_heartbeat, daemon=True).start()
     threading.Thread(target=master.simulate_task_generation, daemon=True).start()
