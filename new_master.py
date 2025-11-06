@@ -9,20 +9,20 @@ class MasterCoordinator:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.server_id = "4"
+        self.server_id = "Thiago"
         self.neighbors = []  # (host, port)
         self.socket_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket_server.bind((self.host, self.port))
         self.socket_server.listen(5)
 
-        self.pending_tasks = 15
+        self.pending_tasks = 20
         self.threshold = 10
-        self.workers = {}  # {uuid: {"status": "idle", "socket": socket}}
+        self.workers = {}  # {uuid: {"status": "idle"|"busy", "socket": socket}}
 
         print(f"[Coordinator] Master {self.server_id[:8]} pronto em {self.host}:{self.port}")
         threading.Thread(target=self.listen_for_masters, daemon=True).start()
 
-    # ---------------------------
+    # -----------------------------------------------------------
     def add_neighbor(self, neighbor_host, neighbor_port):
         self.neighbors.append((neighbor_host, neighbor_port))
 
@@ -81,7 +81,7 @@ class MasterCoordinator:
         finally:
             client_socket.close()
 
-    # ---------------------------
+    # -----------------------------------------------------------
     def send_heartbeat(self):
         while True:
             for neighbor_host, neighbor_port in self.neighbors:
@@ -99,7 +99,7 @@ class MasterCoordinator:
                     print(f"[Coordinator] Falha ao enviar HEARTBEAT → {e}")
             time.sleep(5)
 
-    # ---------------------------
+    # -----------------------------------------------------------
     def simulate_task_generation(self):
         while True:
             time.sleep(random.randint(3, 10))
@@ -121,9 +121,8 @@ class MasterCoordinator:
                     message = json.loads(response.decode("utf-8"))
                     if message.get("RESPONSE") == "AVAILABLE":
                         workers = message.get("WORKERS", [])
-                        print(f"[SUPORTE] {len(workers)} workers disponíveis em {neighbor_host}")
+                        print(f"[SUPORTE] {len(workers)} worker(s) disponíveis em {neighbor_host}")
 
-                        # ✅ Confirma apenas se realmente quiser receber
                         confirm_payload = {
                             "TASK": "REDIRECT_CONFIRM",
                             "WORKERS": workers,
@@ -140,24 +139,25 @@ class MasterCoordinator:
             except Exception as e:
                 print(f"[SUPORTE] Erro ao contatar {neighbor_host}:{neighbor_port} → {e}")
 
-    # ---------------------------
+    # -----------------------------------------------------------
     def handle_worker_request(self, client_socket, message):
         requester_master_id = message.get("MASTER")
         requester_host, requester_port = client_socket.getpeername()
         available_workers = [w for w, info in self.workers.items() if info["status"] == "idle"]
 
-        if available_workers:
+        if len(available_workers) > 1:  # ✅ só doa se tiver mais de um worker livre
+            selected_worker = random.choice(available_workers)
             response = {
                 "MASTER": self.server_id,
                 "RESPONSE": "AVAILABLE",
-                "WORKERS": [{"WORKER_UUID": w} for w in available_workers]
+                "WORKERS": [{"WORKER_UUID": selected_worker}]
             }
             client_socket.sendall(json.dumps(response).encode("utf-8"))
-            print(f"[SUPORTE] Há {len(available_workers)} workers disponíveis. Aguardando confirmação.")
+            print(f"[SUPORTE] Oferecendo 1 worker ({selected_worker}) para {requester_master_id}.")
         else:
             response = {"MASTER": self.server_id, "RESPONSE": "UNAVAILABLE"}
             client_socket.sendall(json.dumps(response).encode("utf-8"))
-            print(f"[SUPORTE] Nenhum worker disponível para {requester_master_id}.")
+            print(f"[SUPORTE] Nenhum worker extra disponível para {requester_master_id}.")
 
     def handle_redirect_confirm(self, message):
         workers = message.get("WORKERS", [])
@@ -167,6 +167,10 @@ class MasterCoordinator:
         for w_info in workers:
             worker_uuid = w_info.get("WORKER_UUID")
             self.redirect_worker_to_master(worker_uuid, target_host, target_port)
+            # ✅ Remove o worker localmente após redirecionar
+            if worker_uuid in self.workers:
+                del self.workers[worker_uuid]
+                print(f"[BALANCEAMENTO] Worker {worker_uuid} transferido. Restam {len(self.workers)} no Master.")
 
     def redirect_worker_to_master(self, worker_uuid, target_master_host, target_master_port):
         if worker_uuid not in self.workers:
@@ -180,7 +184,7 @@ class MasterCoordinator:
         except Exception as e:
             print(f"[REDIRECIONAMENTO] Falha ao redirecionar {worker_uuid}: {e}")
 
-    # ---------------------------
+    # -----------------------------------------------------------
     def confirm_worker_assignment(self, client_socket, worker_uuid):
         message = {"TASK": "ASSIGN_MASTER", "MESSAGE": f"Agora você pertence ao Master {self.server_id[:8]}"}
         try:
@@ -201,13 +205,14 @@ class MasterCoordinator:
         except Exception as e:
             print(f"[Coordinator] Erro ao enviar task: {e}")
 
-# ---------------------------
+# -----------------------------------------------------------
 if __name__ == "__main__":
     host = "10.62.217.209"
     port = 5000
 
     master = MasterCoordinator(host, port)
     master.add_neighbor("10.62.217.11", 5000)
+    # master.add_neighbor("10.62.217.207", 5000)
 
     threading.Thread(target=master.send_heartbeat, daemon=True).start()
     threading.Thread(target=master.simulate_task_generation, daemon=True).start()
