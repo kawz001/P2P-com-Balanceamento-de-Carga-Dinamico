@@ -4,6 +4,15 @@ import socket
 import threading
 import uuid
 from queue import Queue
+import logging
+
+# --------------------------- CONFIGURAÇÃO DE LOG ---------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("Worker")
 
 class Worker:
     def __init__(self, host, port, master_host, master_port):
@@ -17,7 +26,7 @@ class Worker:
         self.task_queue = Queue()
         self.active_tasks = 0
         self.max_tasks = 2
-        print(f"[Worker] Iniciado {self.worker_uuid[:8]} em {self.host}:{self.port}")
+        logger.info(f"Iniciado {self.worker_uuid[:8]} em {self.host}:{self.port}")
 
     def connect_to_master(self):
         while not self.is_connected:
@@ -25,12 +34,12 @@ class Worker:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.socket.connect((self.master_host, self.master_port))
                 self.is_connected = True
-                print(f"[Worker] Conectado ao Master {self.master_host}:{self.master_port}")
+                logger.info(f"Conectado ao Master {self.master_host}:{self.master_port}")
                 self.register_to_master()
                 threading.Thread(target=self.listen_for_messages, daemon=True).start()
                 threading.Thread(target=self.task_scheduler, daemon=True).start()
             except Exception as e:
-                print(f"[Worker] Falha ao conectar: {e}. Tentando novamente em 5s...")
+                logger.warning(f"Falha ao conectar: {e}. Tentando novamente em 5s...")
                 time.sleep(5)
 
     def register_to_master(self):
@@ -47,13 +56,13 @@ class Worker:
             try:
                 data = self.socket.recv(4096)
                 if not data:
-                    print("[Worker] Conexão perdida com Master.")
+                    logger.warning("Conexão perdida com Master.")
                     self.reconnect()
                     break
                 message = json.loads(data.decode("utf-8"))
                 self.handle_message(message)
             except Exception as e:
-                print(f"[Worker] Erro ao receber dados: {e}")
+                logger.error(f"Erro ao receber dados: {e}")
                 self.reconnect()
 
     def handle_message(self, message):
@@ -62,25 +71,25 @@ class Worker:
         if task_type == "REDIRECT":
             new_master_host = message.get("MASTER_REDIRECT")
             new_master_port = message.get("MASTER_REDIRECT_PORT")
-            print(f"[Worker] 🔄 Redirecionado → {new_master_host}:{new_master_port}")
+            logger.info(f"🔄 Redirecionado → {new_master_host}:{new_master_port}")
             self.disconnect()
             self.master_host = new_master_host
             self.master_port = new_master_port
             self.connect_to_master()
 
         elif task_type == "ASSIGN_MASTER":
-            print(f"[Worker] 📩 {message.get('MESSAGE','')}")
+            logger.info(f"📩 {message.get('MESSAGE', '')}")
 
         elif message.get("type") == "new_task":
             task = message["task"]
-            print(f"[Worker] 📦 Nova tarefa {task['task_id']}")
+            logger.info(f"📦 Nova tarefa {task['task_id']}")
             self.task_queue.put(task)
 
         elif task_type == "HEARTBEAT":
             response = {"SERVER_ID": self.port, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}
             self.send_message(response)
         else:
-            print(f"[Worker] Mensagem desconhecida: {message}")
+            logger.warning(f"Mensagem desconhecida: {message}")
 
     def task_scheduler(self):
         while True:
@@ -91,9 +100,9 @@ class Worker:
 
     def process_task(self, task):
         self.active_tasks += 1
-        print(f"[Worker] 🧩 Executando tarefa {task['task_id']}")
+        logger.info(f"🧩 Executando tarefa {task['task_id']}")
         time.sleep(task.get("workload", 3))
-        print(f"[Worker] ✅ Tarefa {task['task_id']} concluída.")
+        logger.info(f"✅ Tarefa {task['task_id']} concluída.")
         self.active_tasks -= 1
         self.send_message({
             "type": "task_completed",
@@ -106,7 +115,7 @@ class Worker:
             try:
                 self.socket.sendall(json.dumps(message).encode("utf-8"))
             except Exception as e:
-                print(f"[Worker] Erro ao enviar mensagem: {e}")
+                logger.error(f"Erro ao enviar mensagem: {e}")
                 self.reconnect()
 
     def disconnect(self):
@@ -116,11 +125,11 @@ class Worker:
         except:
             pass
         self.is_connected = False
-        print("[Worker] Desconectado do Master.")
+        logger.info("Desconectado do Master.")
 
     def reconnect(self):
         self.disconnect()
-        print("[Worker] Tentando reconectar...")
+        logger.info("Tentando reconectar...")
         time.sleep(5)
         self.connect_to_master()
 
