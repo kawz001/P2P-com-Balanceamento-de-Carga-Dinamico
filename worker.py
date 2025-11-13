@@ -1,213 +1,244 @@
-import time
-import json
+#!/usr/bin/env python3
+# worker_sd_completo.py
+# Worker completo compatível com master_sd_emojis.py
+# Agora com: heartbeat correto, reconexão, persistência e métricas
+# Autor: ChatGPT
+
 import socket
 import threading
+import json
+import time
 import uuid
-from queue import Queue
+import random
 import logging
+import os
 
-# --------------------------- CONFIGURAÇÃO DE LOG ---------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger("Worker")
+# ---------------------------
+# CONFIGURAÇÃO
+# ---------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+logger = logging.getLogger("WORKER")
 
-class Worker:
-    def __init__(self, host, port, master_host, master_port):
-        self.host = host
-        self.port = port
-        self.master_host = master_host
-        self.master_port = master_port
-        self.worker_uuid = str(uuid.uuid4())
-        self.original_master = None  # guarda "ip:port" do master original se for emprestado
-        self.is_connected = False
-        self.socket = None
-        self.task_queue = Queue()
-        self.active_tasks = 0
-        self.max_tasks = 2
-        logger.info(f"Iniciado {self.worker_uuid[:8]} em {self.host}:{self.port}")
+WORKER_UUID = f"WORKER-{str(uuid.uuid4())[:8]}"
+STATE_FILE = "worker_state.json"
 
-    def connect_to_master(self):
-        while not self.is_connected:
-            try:
-                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.socket.connect((self.master_host, self.master_port))
-                self.is_connected = True
-                logger.info(f"Conectado ao Master {self.master_host}:{self.master_port}")
-                self.register_to_master()
-                threading.Thread(target=self.listen_for_messages, daemon=True).start()
-                threading.Thread(target=self.task_scheduler, daemon=True).start()
-            except Exception as e:
-                logger.warning(f"Falha ao conectar: {e}. Tentando novamente em 5s...")
-                time.sleep(5)
+HOST = "10.62.217.209"
+PORT = random.randint(5000, 5000)
+DEFAULT_MASTER = {"ip": "10.62.217.207", "port": 5000}
 
-    def register_to_master(self):
-        # Envia registro para o master atual. Se este worker for emprestado, inclui SERVER_UUID do dono original.
-        payload = {
-            "WORKER": "ALIVE",
-            "WORKER_UUID": self.worker_uuid
-        }
-        # Se temos um master de origem e for diferente do atual, enviamos SERVER_UUID para indicar empréstimo
-        if self.original_master and (self.original_master != f"{self.master_host}:{self.master_port}"):
-            payload["SERVER_UUID"] = self.original_master
-        self.send_message(payload)
-        logger.info(f"Registro enviado ao master ({self.master_host}:{self.master_port}): {payload}")
+HEARTBEAT_INTERVAL = 8
+RECONNECT_DELAY = 3
+EXECUTION_TIME = (2, 5)
 
-    def listen_for_messages(self):
-        # Lê do socket em streaming; usa '\n' como delimitador de mensagens JSON.
-        buffer = ""
-        while self.is_connected:
-            try:
-                data = self.socket.recv(4096)
-                if not data:
-                    logger.warning("Conexão perdida com Master.")
-                    self.reconnect()
-                    break
-                buffer += data.decode('utf-8')
-                while '\n' in buffer:
-                    line, buffer = buffer.split('\n', 1)
-                    if not line.strip():
-                        continue
-                    try:
-                        message = json.loads(line)
-                        logger.info(f"Mensagem recebida (parsed): {message}")
-                        self.handle_message(message)
-                    except Exception as e:
-                        logger.error(f"Mensagem inválida recebida: {e} | raw: {line}")
-            except Exception as e:
-                logger.error(f"Erro ao receber dados: {e}")
-                self.reconnect()
+# ---------------------------
+# VARIÁVEIS DE ESTADO
+# ---------------------------
+lock = threading.Lock()
+current_master = DEFAULT_MASTER.copy()
+running = True
+metrics = {"executadas": 0, "falhas": 0}
 
-    def handle_message(self, message):
-        task_type = message.get("TASK")
+# ---------------------------
+# PERSISTÊNCIA
+# ---------------------------
+def salvar_estado():
+    """Salva o master atual em disco."""
+    with lock:
+        with open(STATE_FILE, "w") as f:
+            json.dump(current_master, f)
 
-        # Suporta tanto payloads antigos quanto os do PDF (SERVER_REDIRECT, SERVER_RETURN etc.)
-        if task_type == "REDIRECT":
-            # Accept both formats: {'MASTER_REDIRECT','MASTER_REDIRECT_PORT'} or {'SERVER_REDIRECT': {'ip', 'port'}}
-            sr = message.get("SERVER_REDIRECT")
-            if sr:
-                new_master_host = sr.get("ip")
-                new_master_port = sr.get("port")
-            else:
-                new_master_host = message.get("MASTER_REDIRECT")
-                new_master_port = message.get("MASTER_REDIRECT_PORT")
-            logger.info(f"🔄 Redirecionado → {new_master_host}:{new_master_port}")
-            # Mark original master if not already set
-            if not self.original_master:
-                try:
-                    self.original_master = f"{self.master_host}:{self.master_port}"
-                except Exception:
-                    self.original_master = None
-            self.disconnect()
-            self.master_host = new_master_host
-            self.master_port = new_master_port
-            # connect_to_master fará o registro (incluindo SERVER_UUID se for emprestado)
-            self.connect_to_master()
-
-        elif task_type == "RETURN":
-            # Ordem para retornar ao master original. SERVER_RETURN contains ip/port
-            sr = message.get("SERVER_RETURN")
-            if sr:
-                return_ip = sr.get("ip")
-                return_port = sr.get("port")
-                logger.info(f"🔙 Ordem de retorno recebida. Voltando para {return_ip}:{return_port}")
-                # Atualiza master para o original
-                self.disconnect()
-                self.master_host = return_ip
-                self.master_port = return_port
-                # clear original_master since we returned
-                self.original_master = None
-                self.connect_to_master()
-            else:
-                logger.warning("Payload RETURN inválido: sem SERVER_RETURN")
-
-        elif task_type == "ASSIGN_MASTER":
-            logger.info(f"📩 {message.get('MESSAGE', '')}")
-
-        elif message.get("type") == "new_task":
-            task = message["task"]
-            logger.info(f"📦 Nova tarefa recebida (id={task.get('task_id')} workload={task.get('workload')})")
-            self.task_queue.put(task)
-
-        elif task_type == "HEARTBEAT":
-            # Responder com o formato pedido no PDF: SERVER_UUID e TASK=HEARTBEAT
-            response = {"SERVER_UUID": f"{self.host}:{self.port}", "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}
-            self.send_message(response)
-
-        elif message.get("STATUS"):
-            # Recebe confirmação de status (ACK) ou comandos genéricos
-            logger.info(f"Status message recebida: {message}")
-
-        else:
-            logger.warning(f"Mensagem desconhecida: {message}")
-
-    def task_scheduler(self):
-        while True:
-            if not self.task_queue.empty() and self.active_tasks < self.max_tasks:
-                task = self.task_queue.get()
-                threading.Thread(target=self.process_task, args=(task,), daemon=True).start()
-            time.sleep(0.5)
-
-    def process_task(self, task):
-        self.active_tasks += 1
-        logger.info(f"🧩 Executando tarefa {task['task_id']} (workload={task.get('workload')}) — active_tasks={self.active_tasks}")
-        time.sleep(task.get("workload", 3))
-        logger.info(f"✅ Tarefa {task['task_id']} concluída.")
-        self.active_tasks -= 1
-        # Reporta status conforme especificação: STATUS / TASK / WORKER_UUID
-        status_payload = {"STATUS": "OK", "TASK": task.get("task_id") or task.get("task_type", "QUERY"), "WORKER_UUID": self.worker_uuid}
-        self.send_message(status_payload)
-        # Também envia evento compatível antigo para masters que esperam 'task_completed'
+def carregar_estado():
+    """Carrega o master anterior (se existir)."""
+    global current_master
+    if os.path.exists(STATE_FILE):
         try:
-            self.send_message({
-                "type": "task_completed",
-                "task_id": task["task_id"],
-                "worker_uuid": self.worker_uuid
-            })
+            with open(STATE_FILE) as f:
+                current_master = json.load(f)
+                logger.info(f"💾 [RECUPERADO] Último master: {current_master['ip']}:{current_master['port']}")
         except Exception:
-            pass
+            logger.warning("⚠️ [RECUPERADO] Falha ao carregar estado, usando padrão.")
 
-    def send_message(self, message):
-        # Adiciona delimitador '\n' para framing e envia JSON seguro
-        if self.is_connected:
-            try:
-                payload = json.dumps(message, ensure_ascii=False) + '\n'
-                # log do envio para rastreio
-                try:
-                    logger.debug(f"Enviando ao master ({self.master_host}:{self.master_port}): {message}")
-                except:
-                    pass
-                self.socket.sendall(payload.encode('utf-8'))
-            except Exception as e:
-                logger.error(f"Erro ao enviar mensagem: {e} | payload: {message}")
-                self.reconnect()
-        else:
-            logger.warning("Tentativa de enviar mensagem sem conexão ativa.")
+# ---------------------------
+# UTILITÁRIOS
+# ---------------------------
+def enviar_json(sock, obj):
+    sock.sendall((json.dumps(obj) + "\n").encode())
 
-    def disconnect(self):
+def receber_json(sock, timeout=10):
+    sock.settimeout(timeout)
+    data = b""
+    try:
+        while b"\n" not in data:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        return None
+    if not data:
+        return None
+    try:
+        return json.loads(data.decode().split("\n")[0])
+    except Exception:
+        return None
+
+# ---------------------------
+# EXECUÇÃO DE TAREFAS
+# ---------------------------
+def executar_tarefa(task_data):
+    logger.info(f"⚙️ [EXECUÇÃO] Iniciando tarefa com dados: {task_data}")
+    time.sleep(random.uniform(*EXECUTION_TIME))
+    sucesso = random.choice([True, True, True, False])
+    if sucesso:
+        logger.info("✅ [EXECUÇÃO] Tarefa concluída com sucesso!")
+        metrics["executadas"] += 1
+        return "OK"
+    else:
+        logger.warning("⚠️ [EXECUÇÃO] Falha durante a tarefa!")
+        metrics["falhas"] += 1
+        return "NOK"
+
+# ---------------------------
+# CONEXÃO COM MASTER
+# ---------------------------
+def ciclo_worker():
+    """Loop principal do worker (envia ALIVE e executa tarefas)."""
+    global current_master
+    while running:
         try:
-            if self.socket:
-                self.socket.close()
-        except:
-            pass
-        self.is_connected = False
-        logger.info("Desconectado do Master.")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(10)
+                s.connect((current_master["ip"], current_master["port"]))
+                payload = {
+                    "WORKER": "ALIVE",
+                    "WORKER_UUID": WORKER_UUID,
+                    "port": PORT
+                }
+                enviar_json(s, payload)
+                logger.info(f"📡 [ENVIO] Pedido de tarefa enviado a {current_master['ip']}:{current_master['port']}")
+                resp = receber_json(s, timeout=10)
 
-    def reconnect(self):
-        self.disconnect()
-        logger.info("Tentando reconectar...")
-        time.sleep(5)
-        self.connect_to_master()
+                if not resp:
+                    logger.warning("💤 [TIMEOUT] Nenhuma resposta do Master.")
+                    time.sleep(RECONNECT_DELAY)
+                    continue
 
-if __name__ == "__main__":
-    worker = Worker(
-        host="127.0.0.1",
-        port=5070,
-        master_host="127.0.0.1",
-        master_port=5000
-    )
-    worker.connect_to_master()
+                if resp.get("TASK") == "QUERY":
+                    tarefa = resp.get("USER")
+                    status = executar_tarefa(tarefa)
+                    with socket.socket() as report:
+                        report.connect((current_master["ip"], current_master["port"]))
+                        enviar_json(report, {"WORKER_UUID": WORKER_UUID, "TASK": "QUERY", "STATUS": status})
+                        ack = receber_json(report, timeout=5)
+                        if ack and ack.get("STATUS") == "ACK":
+                            logger.info("📬 [ACK] Status confirmado pelo Master.")
+                elif resp.get("TASK") == "NO_TASK":
+                    logger.info("📭 [NO_TASK] Nenhuma tarefa disponível.")
+                    time.sleep(3)
+                else:
+                    logger.debug(f"❓ [DESCONHECIDO] Payload inesperado: {resp}")
+
+        except Exception as e:
+            logger.error(f"🔴 [ERRO] Falha de comunicação com Master: {e}")
+            time.sleep(RECONNECT_DELAY)
+
+# ---------------------------
+# HEARTBEAT CORRIGIDO
+# ---------------------------
+def heartbeat_loop():
+    """Envia heartbeat compatível com o Master."""
+    global current_master
+    while running:
+        try:
+            with socket.socket() as s:
+                s.settimeout(5)
+                s.connect((current_master["ip"], current_master["port"]))
+                enviar_json(s, {"TASK": "WORKER_HEARTBEAT", "WORKER_UUID": WORKER_UUID})
+                resp = receber_json(s, timeout=5)
+                if resp and resp.get("RESPONSE") == "ALIVE":
+                    logger.info(f"💓 [HEARTBEAT] OK - Master {current_master['ip']} respondeu.")
+                else:
+                    logger.warning(f"💤 [HEARTBEAT] Sem resposta do Master.")
+        except Exception as e:
+            logger.warning(f"💔 [HEARTBEAT] Erro ao enviar heartbeat: {e}")
+        time.sleep(HEARTBEAT_INTERVAL)
+
+# ---------------------------
+# COMANDOS REMOTOS (REDIRECT / RETURN)
+# ---------------------------
+def tratar_comando(conn, addr):
+    global current_master
+    msg = receber_json(conn)
+    if not msg:
+        return
+    task = msg.get("TASK")
+
+    if task == "REDIRECT":
+        info = msg["SERVER_REDIRECT"]
+        new_ip, new_port = info["ip"], info["port"]
+        logger.info(f"🔀 [REDIRECT] Mudando para {new_ip}:{new_port}")
+        with lock:
+            current_master["ip"], current_master["port"] = new_ip, new_port
+            salvar_estado()
+        time.sleep(1)
+        threading.Thread(target=ciclo_worker, daemon=True).start()
+
+    elif task == "RETURN":
+        info = msg["SERVER_RETURN"]
+        new_ip, new_port = info["ip"], info["port"]
+        logger.info(f"🔁 [RETURN] Retornando a {new_ip}:{new_port}")
+        with lock:
+            current_master["ip"], current_master["port"] = new_ip, new_port
+            salvar_estado()
+        time.sleep(1)
+        threading.Thread(target=ciclo_worker, daemon=True).start()
+
+    elif task in ("HEARTBEAT", "WORKER_HEARTBEAT"):
+        logger.debug("💤 [IGNORADO] Heartbeat recebido - ignorado.")
+        return
+
+    else:
+        logger.warning(f"❓ [COMANDO] Payload desconhecido: {msg}")
+
+# ---------------------------
+# SERVIDOR LOCAL
+# ---------------------------
+def iniciar_servidor_local():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((HOST, PORT))
+    s.listen(10)
+    logger.info(f"🛰️ [LISTEN] Worker {WORKER_UUID} ouvindo comandos em {HOST}:{PORT}")
+    try:
+        while running:
+            conn, addr = s.accept()
+            threading.Thread(target=tratar_comando, args=(conn, addr), daemon=True).start()
+    except Exception as e:
+        logger.error(f"🔴 [SERVIDOR] Erro listener: {e}")
+    finally:
+        s.close()
+
+# ---------------------------
+# MÉTRICAS PERIÓDICAS
+# ---------------------------
+def metricas_loop():
+    while running:
+        with lock:
+            logger.info(f"📈 [MÉTRICAS] Conectado a {current_master['ip']}:{current_master['port']} | Tarefas OK: {metrics['executadas']} | Falhas: {metrics['falhas']}")
+        time.sleep(10)
+
+# ---------------------------
+# MAIN
+# ---------------------------
+def main():
+    carregar_estado()
+    logger.info(f"🚀 Iniciando Worker {WORKER_UUID} -> {current_master['ip']}:{current_master['port']}")
+    threading.Thread(target=iniciar_servidor_local, daemon=True).start()
+    threading.Thread(target=ciclo_worker, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=metricas_loop, daemon=True).start()
     while True:
         time.sleep(1)
+
+if __name__ == "__main__":
+    main()
