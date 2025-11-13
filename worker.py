@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-# worker_sd_completo.py
-# Worker completo compatível com master_sd_emojis.py
-# Agora com: heartbeat correto, reconexão, persistência e métricas
-# Autor: ChatGPT
 
 import socket
 import threading

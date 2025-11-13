@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-# master_sd_emojis.py
-# Master para o projeto P2P de balanceamento de carga (payloads conforme PDF)
-# Versão com emojis nos logs para indicar eventos (envio de tarefa, conclusão, redirect, release, heartbeat...)
-# Autor: gerado por ChatGPT - funções e comentários em português
 
 import socket
 import threading
