@@ -1,4 +1,3 @@
-
 import socket
 import threading
 import json
@@ -14,6 +13,9 @@ import os
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("WORKER")
 
+# Identificador do "server" que o worker reportará (farm name)
+SERVER_UUID = "michel_2"
+
 WORKER_UUID = f"WORKER-{str(uuid.uuid4())[:8]}"
 STATE_FILE = "worker_state.json"
 
@@ -25,6 +27,11 @@ HEARTBEAT_INTERVAL = 8
 RECONNECT_DELAY = 3
 EXECUTION_TIME = (2, 5)
 
+# Supervisor de métricas
+SUPERVISOR_HOST = "srv.webrelay.dev"
+SUPERVISOR_PORT = 40595
+METRICS_INTERVAL = 10  # enviar a cada 10s
+
 # ---------------------------
 # VARIÁVEIS DE ESTADO
 # ---------------------------
@@ -34,16 +41,26 @@ running = True
 metrics = {"executadas": 0, "falhas": 0}
 
 # ---------------------------
+# tenta importar psutil
+# ---------------------------
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+    logger.info("psutil disponível: usando métricas reais.")
+except Exception:
+    psutil = None
+    PSUTIL_AVAILABLE = False
+    logger.warning("psutil NÃO disponível: usando métricas simuladas (fallback).")
+
+# ---------------------------
 # PERSISTÊNCIA
 # ---------------------------
 def salvar_estado():
-    """Salva o master atual em disco."""
     with lock:
         with open(STATE_FILE, "w") as f:
             json.dump(current_master, f)
 
 def carregar_estado():
-    """Carrega o master anterior (se existir)."""
     global current_master
     if os.path.exists(STATE_FILE):
         try:
@@ -97,7 +114,6 @@ def executar_tarefa(task_data):
 # CONEXÃO COM MASTER
 # ---------------------------
 def ciclo_worker():
-    """Loop principal do worker (envia ALIVE e executa tarefas)."""
     global current_master
     while running:
         try:
@@ -141,7 +157,6 @@ def ciclo_worker():
 # HEARTBEAT CORRIGIDO
 # ---------------------------
 def heartbeat_loop():
-    """Envia heartbeat compatível com o Master."""
     global current_master
     while running:
         try:
@@ -214,7 +229,138 @@ def iniciar_servidor_local():
         s.close()
 
 # ---------------------------
-# MÉTRICAS PERIÓDICAS
+# MÉTRICAS: compor payload exatamente conforme solicitado e enviar (apenas SEND)
+# ---------------------------
+def coletar_metricas_worker():
+    ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    mensage_id = str(uuid.uuid4())
+
+    if PSUTIL_AVAILABLE:
+        try:
+            uptime_seconds = int(time.time() - psutil.boot_time())
+        except Exception:
+            uptime_seconds = 0
+        try:
+            la1, la5, la15 = psutil.getloadavg()
+        except Exception:
+            la1 = round(psutil.cpu_percent(interval=0.1), 1)
+            la5 = la1
+        cpu_usage = round(psutil.cpu_percent(interval=0.1), 1)
+        cpu_count_logical = psutil.cpu_count(logical=True) or 1
+        cpu_count_physical = psutil.cpu_count(logical=False) or cpu_count_logical
+        vm = psutil.virtual_memory()
+        mem_total_mb = int(vm.total // (1024 * 1024))
+        mem_available_mb = int(vm.available // (1024 * 1024))
+        mem_percent_used = round(vm.percent, 1)
+        mem_used_gb = round((vm.total - vm.available) / (1024**3), 1)
+        du = psutil.disk_usage("/")
+        disk_total_gb = round(du.total / (1024**3), 1)
+        disk_free_gb = round(du.free / (1024**3), 1)
+        disk_percent_used = round(du.percent, 1)
+    else:
+        uptime_seconds = random.randint(10000, 200000)
+        la1 = round(random.uniform(0, 4), 1)
+        la5 = round(random.uniform(0, 4), 1)
+        cpu_usage = round(random.uniform(0, 100), 1)
+        cpu_count_logical = os.cpu_count() or 4
+        cpu_count_physical = max(1, cpu_count_logical // 2)
+        mem_total_mb = 8192
+        mem_available_mb = random.randint(256, mem_total_mb)
+        mem_percent_used = round(100 * (mem_total_mb - mem_available_mb) / mem_total_mb, 1)
+        mem_used_gb = round((mem_total_mb - mem_available_mb) / 1024, 1)
+        disk_total_gb = 256.0
+        disk_free_gb = round(random.uniform(1, 240), 1)
+        disk_percent_used = round(100 * (disk_total_gb - disk_free_gb) / disk_total_gb, 1)
+
+    # farm_state: do ponto de vista do worker, reportamos info básica
+    with lock:
+        total_registered = 0
+        workers_utilization = 0
+        workers_alive = 0
+        workers_idle = 0
+        workers_borrowed = 0
+        workers_recieved = 0
+        workers_failed = 0
+        tasks_pending = 0
+        tasks_running = 1 if metrics["executadas"] or metrics["falhas"] else 0
+
+    neighbors_list = [{
+        "server_uuid": current_master.get("ip"),
+        "status": "available",
+        "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    }]
+
+    payload = {
+        "server_uuid": SERVER_UUID,
+        "task": "performance_report",
+        "timestamp": ts_iso,
+        "mensage_id": mensage_id,
+        "performance": {
+            "system": {
+                "uptime_seconds": uptime_seconds,
+                "load_average_1m": la1,
+                "load_average_5m": la5,
+                "cpu": {
+                    "usage_percent": cpu_usage,
+                    "count_logical": cpu_count_logical,
+                    "count_physical": cpu_count_physical
+                },
+                "memory": {
+                    "total_mb": mem_total_mb,
+                    "available_mb": mem_available_mb,
+                    "percent_used": mem_percent_used,
+                    "memory_used": mem_used_gb
+                },
+                "disk": {
+                    "total_gb": disk_total_gb,
+                    "free_gb": disk_free_gb,
+                    "percent_used": disk_percent_used
+                }
+            }
+        },
+        "farm_state": {
+            "workers": {
+                "total_registered": total_registered,
+                "workers_utilization": workers_utilization,
+                "workers_alive": workers_alive,
+                "workers_idle": workers_idle,
+                "workers_borrowed": workers_borrowed,
+                "workers_recieved": workers_recieved,
+                "workers_failed": workers_failed
+            },
+            "tasks": {
+                "tasks_pending": tasks_pending,
+                "tasks_running": tasks_running
+            }
+        },
+        "config_thresholds": {
+            "max_task": 100
+        },
+        "neighbors": neighbors_list
+    }
+    return payload
+
+def enviar_metricas_para_supervisor(payload):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(5)
+            s.connect((SUPERVISOR_HOST, SUPERVISOR_PORT))
+            s.sendall((json.dumps(payload) + "\n").encode())
+        logger.info(f"📤 [METRICS] Worker enviou métricas: {payload['mensage_id']}")
+    except Exception as e:
+        logger.warning(f"⚠️ [METRICS] Falha ao enviar métricas (worker): {e}")
+
+def metrics_sender_loop():
+    while True:
+        try:
+            payload = coletar_metricas_worker()
+            enviar_metricas_para_supervisor(payload)
+        except Exception as e:
+            logger.error(f"🔴 [METRICS] Erro na coleta/envio (worker): {e}")
+        time.sleep(METRICS_INTERVAL)
+
+# ---------------------------
+# MÉTRICAS PERIÓDICAS (LOG LOCAL)
 # ---------------------------
 def metricas_loop():
     while running:
@@ -232,6 +378,8 @@ def main():
     threading.Thread(target=ciclo_worker, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=metricas_loop, daemon=True).start()
+    # iniciar envio de métricas ao supervisor
+    threading.Thread(target=metrics_sender_loop, daemon=True).start()
     while True:
         time.sleep(1)
 
