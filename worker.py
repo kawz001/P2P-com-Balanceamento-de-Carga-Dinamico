@@ -7,379 +7,261 @@ import random
 import logging
 import os
 
-# ---------------------------
-# CONFIGURAÇÃO
-# ---------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s",
+                    datefmt="%H:%M:%S")
+
 logger = logging.getLogger("WORKER")
 
-# Identificador do "server" que o worker reportará (farm name)
 SERVER_UUID = "michel_2"
-
 WORKER_UUID = f"WORKER-{str(uuid.uuid4())[:8]}"
-STATE_FILE = "worker_state.json"
 
-HOST = "10.62.217.209"
-PORT = random.randint(5000, 5000)
-DEFAULT_MASTER = {"ip": "10.62.217.207", "port": 5000}
+HOST = "0.0.0.0"
+PORT = random.randint(9000, 9999)
 
-HEARTBEAT_INTERVAL = 8
-RECONNECT_DELAY = 3
-EXECUTION_TIME = (2, 5)
+current_master = {"ip": "10.62.217.207", "port": 5000}
 
-# Supervisor de métricas
+# Supervisor
 SUPERVISOR_HOST = "srv.webrelay.dev"
-SUPERVISOR_PORT = 40595
-METRICS_INTERVAL = 10  # enviar a cada 10s
+SUPERVISOR_PORT = 33905
+METRICS_INTERVAL = 10
 
-# ---------------------------
-# VARIÁVEIS DE ESTADO
-# ---------------------------
-lock = threading.Lock()
-current_master = DEFAULT_MASTER.copy()
-running = True
-metrics = {"executadas": 0, "falhas": 0}
-
-# ---------------------------
-# tenta importar psutil
-# ---------------------------
 try:
     import psutil
     PSUTIL_AVAILABLE = True
-    logger.info("psutil disponível: usando métricas reais.")
-except Exception:
-    psutil = None
+except:
     PSUTIL_AVAILABLE = False
-    logger.warning("psutil NÃO disponível: usando métricas simuladas (fallback).")
 
-# ---------------------------
-# PERSISTÊNCIA
-# ---------------------------
-def salvar_estado():
-    with lock:
-        with open(STATE_FILE, "w") as f:
-            json.dump(current_master, f)
+lock = threading.Lock()
+running = True
+metrics = {"executadas": 0, "falhas": 0}
 
-def carregar_estado():
-    global current_master
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE) as f:
-                current_master = json.load(f)
-                logger.info(f"💾 [RECUPERADO] Último master: {current_master['ip']}:{current_master['port']}")
-        except Exception:
-            logger.warning("⚠️ [RECUPERADO] Falha ao carregar estado, usando padrão.")
+def enviar_json(sock, payload):
+    sock.sendall((json.dumps(payload) + "\n").encode())
 
-# ---------------------------
-# UTILITÁRIOS
-# ---------------------------
-def enviar_json(sock, obj):
-    sock.sendall((json.dumps(obj) + "\n").encode())
-
-def receber_json(sock, timeout=10):
+def receber_json(sock, timeout=5):
     sock.settimeout(timeout)
     data = b""
     try:
         while b"\n" not in data:
-            chunk = sock.recv(4096)
-            if not chunk:
+            part = sock.recv(4096)
+            if not part:
                 break
-            data += chunk
-    except socket.timeout:
-        return None
-    if not data:
+            data += part
+    except:
         return None
     try:
         return json.loads(data.decode().split("\n")[0])
-    except Exception:
+    except:
         return None
 
-# ---------------------------
-# EXECUÇÃO DE TAREFAS
-# ---------------------------
-def executar_tarefa(task_data):
-    logger.info(f"⚙️ [EXECUÇÃO] Iniciando tarefa com dados: {task_data}")
-    time.sleep(random.uniform(*EXECUTION_TIME))
-    sucesso = random.choice([True, True, True, False])
-    if sucesso:
-        logger.info("✅ [EXECUÇÃO] Tarefa concluída com sucesso!")
+# ==========================================
+# EXECUTAR TAREFA
+# ==========================================
+def executar_tarefa(task):
+    time.sleep(random.uniform(1,3))
+    ok = random.choice([True,True,False])
+
+    if ok:
         metrics["executadas"] += 1
         return "OK"
     else:
-        logger.warning("⚠️ [EXECUÇÃO] Falha durante a tarefa!")
         metrics["falhas"] += 1
         return "NOK"
 
-# ---------------------------
-# CONEXÃO COM MASTER
-# ---------------------------
+# ==========================================
+# CICLO WORKER
+# ==========================================
 def ciclo_worker():
     global current_master
     while running:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(10)
-                s.connect((current_master["ip"], current_master["port"]))
-                payload = {
-                    "WORKER": "ALIVE",
+            s = socket.socket()
+            s.settimeout(5)
+            s.connect((current_master["ip"], current_master["port"]))
+            enviar_json(s, {
+                "WORKER": "ALIVE",
+                "WORKER_UUID": WORKER_UUID,
+                "port": PORT
+            })
+            resp = receber_json(s)
+            s.close()
+
+            if not resp:
+                time.sleep(3)
+                continue
+
+            if resp.get("TASK") == "QUERY":
+                status = executar_tarefa(resp["USER"])
+                r2 = socket.socket()
+                r2.connect((current_master["ip"], current_master["port"]))
+                enviar_json(r2, {
                     "WORKER_UUID": WORKER_UUID,
-                    "port": PORT
-                }
-                enviar_json(s, payload)
-                logger.info(f"📡 [ENVIO] Pedido de tarefa enviado a {current_master['ip']}:{current_master['port']}")
-                resp = receber_json(s, timeout=10)
+                    "TASK": "QUERY",
+                    "STATUS": status
+                })
+                r2.close()
 
-                if not resp:
-                    logger.warning("💤 [TIMEOUT] Nenhuma resposta do Master.")
-                    time.sleep(RECONNECT_DELAY)
-                    continue
+            elif resp.get("TASK") == "NO_TASK":
+                time.sleep(3)
 
-                if resp.get("TASK") == "QUERY":
-                    tarefa = resp.get("USER")
-                    status = executar_tarefa(tarefa)
-                    with socket.socket() as report:
-                        report.connect((current_master["ip"], current_master["port"]))
-                        enviar_json(report, {"WORKER_UUID": WORKER_UUID, "TASK": "QUERY", "STATUS": status})
-                        ack = receber_json(report, timeout=5)
-                        if ack and ack.get("STATUS") == "ACK":
-                            logger.info("📬 [ACK] Status confirmado pelo Master.")
-                elif resp.get("TASK") == "NO_TASK":
-                    logger.info("📭 [NO_TASK] Nenhuma tarefa disponível.")
-                    time.sleep(3)
-                else:
-                    logger.debug(f"❓ [DESCONHECIDO] Payload inesperado: {resp}")
+        except:
+            time.sleep(3)
 
-        except Exception as e:
-            logger.error(f"🔴 [ERRO] Falha de comunicação com Master: {e}")
-            time.sleep(RECONNECT_DELAY)
-
-# ---------------------------
-# HEARTBEAT CORRIGIDO
-# ---------------------------
-def heartbeat_loop():
-    global current_master
-    while running:
-        try:
-            with socket.socket() as s:
-                s.settimeout(5)
-                s.connect((current_master["ip"], current_master["port"]))
-                enviar_json(s, {"TASK": "WORKER_HEARTBEAT", "WORKER_UUID": WORKER_UUID})
-                resp = receber_json(s, timeout=5)
-                if resp and resp.get("RESPONSE") == "ALIVE":
-                    logger.info(f"💓 [HEARTBEAT] OK - Master {current_master['ip']} respondeu.")
-                else:
-                    logger.warning(f"💤 [HEARTBEAT] Sem resposta do Master.")
-        except Exception as e:
-            logger.warning(f"💔 [HEARTBEAT] Erro ao enviar heartbeat: {e}")
-        time.sleep(HEARTBEAT_INTERVAL)
-
-# ---------------------------
-# COMANDOS REMOTOS (REDIRECT / RETURN)
-# ---------------------------
-def tratar_comando(conn, addr):
-    global current_master
-    msg = receber_json(conn)
-    if not msg:
-        return
-    task = msg.get("TASK")
-
-    if task == "REDIRECT":
-        info = msg["SERVER_REDIRECT"]
-        new_ip, new_port = info["ip"], info["port"]
-        logger.info(f"🔀 [REDIRECT] Mudando para {new_ip}:{new_port}")
-        with lock:
-            current_master["ip"], current_master["port"] = new_ip, new_port
-            salvar_estado()
-        time.sleep(1)
-        threading.Thread(target=ciclo_worker, daemon=True).start()
-
-    elif task == "RETURN":
-        info = msg["SERVER_RETURN"]
-        new_ip, new_port = info["ip"], info["port"]
-        logger.info(f"🔁 [RETURN] Retornando a {new_ip}:{new_port}")
-        with lock:
-            current_master["ip"], current_master["port"] = new_ip, new_port
-            salvar_estado()
-        time.sleep(1)
-        threading.Thread(target=ciclo_worker, daemon=True).start()
-
-    elif task in ("HEARTBEAT", "WORKER_HEARTBEAT"):
-        logger.debug("💤 [IGNORADO] Heartbeat recebido - ignorado.")
-        return
-
-    else:
-        logger.warning(f"❓ [COMANDO] Payload desconhecido: {msg}")
-
-# ---------------------------
-# SERVIDOR LOCAL
-# ---------------------------
-def iniciar_servidor_local():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((HOST, PORT))
-    s.listen(10)
-    logger.info(f"🛰️ [LISTEN] Worker {WORKER_UUID} ouvindo comandos em {HOST}:{PORT}")
-    try:
-        while running:
-            conn, addr = s.accept()
-            threading.Thread(target=tratar_comando, args=(conn, addr), daemon=True).start()
-    except Exception as e:
-        logger.error(f"🔴 [SERVIDOR] Erro listener: {e}")
-    finally:
-        s.close()
-
-# ---------------------------
-# MÉTRICAS: compor payload exatamente conforme solicitado e enviar (apenas SEND)
-# ---------------------------
+# ==========================================
+# MÉTRICAS DO WORKER
+# ==========================================
 def coletar_metricas_worker():
-    ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    mensage_id = str(uuid.uuid4())
+
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    msg_id = str(uuid.uuid4())
 
     if PSUTIL_AVAILABLE:
-        try:
-            uptime_seconds = int(time.time() - psutil.boot_time())
-        except Exception:
-            uptime_seconds = 0
+        uptime = int(time.time() - psutil.boot_time())
         try:
             la1, la5, la15 = psutil.getloadavg()
-        except Exception:
-            la1 = round(psutil.cpu_percent(interval=0.1), 1)
+        except:
+            la1 = psutil.cpu_percent(interval=0.1)
             la5 = la1
-        cpu_usage = round(psutil.cpu_percent(interval=0.1), 1)
-        cpu_count_logical = psutil.cpu_count(logical=True) or 1
-        cpu_count_physical = psutil.cpu_count(logical=False) or cpu_count_logical
+
+        cpu = psutil.cpu_percent(interval=0.1)
+        cpu_log = psutil.cpu_count(True)
+        cpu_phy = psutil.cpu_count(False)
+
         vm = psutil.virtual_memory()
-        mem_total_mb = int(vm.total // (1024 * 1024))
-        mem_available_mb = int(vm.available // (1024 * 1024))
-        mem_percent_used = round(vm.percent, 1)
-        mem_used_gb = round((vm.total - vm.available) / (1024**3), 1)
+        mem_total = vm.total // (1024*1024)
+        mem_avail = vm.available // (1024*1024)
+        mem_used = round((vm.total - vm.available)/(1024**3),1)
+
         du = psutil.disk_usage("/")
-        disk_total_gb = round(du.total / (1024**3), 1)
-        disk_free_gb = round(du.free / (1024**3), 1)
-        disk_percent_used = round(du.percent, 1)
+        disk_total = round(du.total/(1024**3),1)
+        disk_free = round(du.free/(1024**3),1)
+        disk_used = du.percent
     else:
-        uptime_seconds = random.randint(10000, 200000)
-        la1 = round(random.uniform(0, 4), 1)
-        la5 = round(random.uniform(0, 4), 1)
-        cpu_usage = round(random.uniform(0, 100), 1)
-        cpu_count_logical = os.cpu_count() or 4
-        cpu_count_physical = max(1, cpu_count_logical // 2)
-        mem_total_mb = 8192
-        mem_available_mb = random.randint(256, mem_total_mb)
-        mem_percent_used = round(100 * (mem_total_mb - mem_available_mb) / mem_total_mb, 1)
-        mem_used_gb = round((mem_total_mb - mem_available_mb) / 1024, 1)
-        disk_total_gb = 256.0
-        disk_free_gb = round(random.uniform(1, 240), 1)
-        disk_percent_used = round(100 * (disk_total_gb - disk_free_gb) / disk_total_gb, 1)
+        uptime=10000
+        la1=la5=1.0
+        cpu=30
+        cpu_log=4
+        cpu_phy=2
+        mem_total=8192
+        mem_avail=4096
+        mem_used=4
+        disk_total=256
+        disk_free=120
+        disk_used=50
 
-    # farm_state: do ponto de vista do worker, reportamos info básica
-    with lock:
-        total_registered = 0
-        workers_utilization = 0
-        workers_alive = 0
-        workers_idle = 0
-        workers_borrowed = 0
-        workers_recieved = 0
-        workers_failed = 0
-        tasks_pending = 0
-        tasks_running = 1 if metrics["executadas"] or metrics["falhas"] else 0
-
-    neighbors_list = [{
-        "server_uuid": current_master.get("ip"),
+    neighbors = [{
+        "server_uuid": current_master["ip"],
         "status": "available",
-        "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        "last_heartbeat": ts
     }]
 
-    payload = {
+    return {
         "server_uuid": SERVER_UUID,
         "task": "performance_report",
-        "timestamp": ts_iso,
-        "mensage_id": mensage_id,
+        "timestamp": ts,
+        "mensage_id": msg_id,
         "performance": {
             "system": {
-                "uptime_seconds": uptime_seconds,
+                "uptime_seconds": uptime,
                 "load_average_1m": la1,
                 "load_average_5m": la5,
                 "cpu": {
-                    "usage_percent": cpu_usage,
-                    "count_logical": cpu_count_logical,
-                    "count_physical": cpu_count_physical
+                    "usage_percent": cpu,
+                    "count_logical": cpu_log,
+                    "count_physical": cpu_phy
                 },
                 "memory": {
-                    "total_mb": mem_total_mb,
-                    "available_mb": mem_available_mb,
-                    "percent_used": mem_percent_used,
-                    "memory_used": mem_used_gb
+                    "total_mb": mem_total,
+                    "available_mb": mem_avail,
+                    "percent_used": round((mem_total-mem_avail)/mem_total*100,1),
+                    "memory_used": mem_used
                 },
                 "disk": {
-                    "total_gb": disk_total_gb,
-                    "free_gb": disk_free_gb,
-                    "percent_used": disk_percent_used
+                    "total_gb": disk_total,
+                    "free_gb": disk_free,
+                    "percent_used": disk_used
                 }
             }
         },
         "farm_state": {
             "workers": {
-                "total_registered": total_registered,
-                "workers_utilization": workers_utilization,
-                "workers_alive": workers_alive,
-                "workers_idle": workers_idle,
-                "workers_borrowed": workers_borrowed,
-                "workers_recieved": workers_recieved,
-                "workers_failed": workers_failed
+                "total_registered": 0,
+                "workers_utilization": 0,
+                "workers_alive": 0,
+                "workers_idle": 0,
+                "workers_borrowed": 0,
+                "workers_recieved": 0,
+                "workers_failed": 0
             },
             "tasks": {
-                "tasks_pending": tasks_pending,
-                "tasks_running": tasks_running
+                "tasks_pending": 0,
+                "tasks_running": 1
             }
         },
         "config_thresholds": {
             "max_task": 100
         },
-        "neighbors": neighbors_list
+        "neighbors": neighbors
     }
-    return payload
 
-def enviar_metricas_para_supervisor(payload):
+def enviar_metricas_supervisor(payload):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(5)
-            s.connect((SUPERVISOR_HOST, SUPERVISOR_PORT))
-            s.sendall((json.dumps(payload) + "\n").encode())
-        logger.info(f"📤 [METRICS] Worker enviou métricas: {payload['mensage_id']}")
+        s = socket.socket()
+        s.settimeout(4)
+        s.connect((SUPERVISOR_HOST, SUPERVISOR_PORT))
+        s.sendall((json.dumps(payload) + "\n").encode())
+        s.close()
+        logger.info("📤 WORKER METRIC SENT")
     except Exception as e:
-        logger.warning(f"⚠️ [METRICS] Falha ao enviar métricas (worker): {e}")
+        logger.warning(f"Erro ao enviar métricas worker: {e}")
 
 def metrics_sender_loop():
     while True:
-        try:
-            payload = coletar_metricas_worker()
-            enviar_metricas_para_supervisor(payload)
-        except Exception as e:
-            logger.error(f"🔴 [METRICS] Erro na coleta/envio (worker): {e}")
+        p = coletar_metricas_worker()
+        logger.info("📦 PAYLOAD WORKER:\n" + json.dumps(p, indent=4))
+        enviar_metricas_supervisor(p)
         time.sleep(METRICS_INTERVAL)
 
-# ---------------------------
-# MÉTRICAS PERIÓDICAS (LOG LOCAL)
-# ---------------------------
-def metricas_loop():
-    while running:
-        with lock:
-            logger.info(f"📈 [MÉTRICAS] Conectado a {current_master['ip']}:{current_master['port']} | Tarefas OK: {metrics['executadas']} | Falhas: {metrics['falhas']}")
-        time.sleep(10)
+# ==========================================
+# SERVIDOR LOCAL DO WORKER
+# ==========================================
+def receber_comandos():
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((HOST, PORT))
+    s.listen(10)
+    logger.info(f"Worker ouvindo comandos em {HOST}:{PORT}")
 
-# ---------------------------
+    while True:
+        conn, addr = s.accept()
+        msg = receber_json(conn)
+        conn.close()
+
+        if not msg:
+            continue
+
+        if msg.get("TASK") == "REDIRECT":
+            with lock:
+                current_master["ip"] = msg["SERVER_REDIRECT"]["ip"]
+                current_master["port"] = msg["SERVER_REDIRECT"]["port"]
+            threading.Thread(target=ciclo_worker, daemon=True).start()
+
+        if msg.get("TASK") == "RETURN":
+            with lock:
+                current_master["ip"] = msg["SERVER_RETURN"]["ip"]
+                current_master["port"] = msg["SERVER_RETURN"]["port"]
+            threading.Thread(target=ciclo_worker, daemon=True).start()
+
+# ==========================================
 # MAIN
-# ---------------------------
+# ==========================================
 def main():
-    carregar_estado()
-    logger.info(f"🚀 Iniciando Worker {WORKER_UUID} -> {current_master['ip']}:{current_master['port']}")
-    threading.Thread(target=iniciar_servidor_local, daemon=True).start()
+    logger.info(f"WORKER {WORKER_UUID} iniciado. Master inicial: {current_master}")
     threading.Thread(target=ciclo_worker, daemon=True).start()
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
-    threading.Thread(target=metricas_loop, daemon=True).start()
-    # iniciar envio de métricas ao supervisor
     threading.Thread(target=metrics_sender_loop, daemon=True).start()
+    threading.Thread(target=receber_comandos, daemon=True).start()
+
     while True:
         time.sleep(1)
 
