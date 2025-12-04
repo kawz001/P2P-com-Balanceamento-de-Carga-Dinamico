@@ -15,12 +15,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # ---------- IDENTIDADE ----------
 MASTER_UUID = f"MASTER-{str(uuid.uuid4())[:8]}"  # identificador do master (pode setar um fixo)
 # Mantive seu MASTER_UUID original (gerado), mas o "server_uuid" que será enviado ao supervisor é michel_1 (abaixo)
-SERVER_UUID = "michel_1"
+SERVER_UUID = "id_4"
 
-HOST = "10.62.217.207"        # endereço onde o master escuta (0.0.0.0 para aceitar de qualquer interface)
+HOST = "10.62.217.22"        # endereço onde o master escuta (0.0.0.0 para aceitar de qualquer interface)
 PORT = 5000             # porta do master
-NEIGHBORS = [("10.62.217.204", 5000)]  # lista de masters vizinhos (ip,port) - configure conforme sua rede
-THRESHOLD = 100000          # limite de saturação (tasks pendentes)
+NEIGHBORS = [("10.62.217.16", 5000), ("10.62.217.199", 5000), ("10.62.217.212", 5000)]  # lista de masters vizinhos (ip,port) - configure conforme sua rede
+THRESHOLD = 10          # limite de saturação (tasks pendentes)
 HEARTBEAT_INTERVAL = 5  # segundos entre heartbeats
 HEARTBEAT_TIMEOUT = 15  # tempo para considerar master inativo
 RELEASE_BATCH = 2       # quantos workers devolver por lote
@@ -40,8 +40,8 @@ logger = logging.getLogger("MASTER")
 # ---------------------------
 # METRICS - Supervisor endpoint e psutil
 # ---------------------------
-SUPERVISOR_HOST = "srv.webrelay.dev"
-SUPERVISOR_PORT = 33905   # uso a porta nova conforme última versão do documento
+SUPERVISOR_HOST = "10.62.217.32"
+SUPERVISOR_PORT = 8000   # uso a porta nova conforme última versão do documento
 METRICS_INTERVAL = 10     # enviar a cada 10s
 
 try:
@@ -86,7 +86,7 @@ def receber_json(conn, timeout=5):
         return None
 
 # ---------------------------
-# TRATAMENTO DE CONEXÕES (mantive todo o comportamento original)
+# TRATAMENTO DE CONEXÕES
 # ---------------------------
 def tratar_cliente(conn, addr):
     """
@@ -266,7 +266,6 @@ def tratar_cliente(conn, addr):
 
 # ---------------------------
 # AÇÕES DE EMPRESTIMO / REDIRECIONAMENTO / DEVOLUÇÃO
-# (mantive suas funções originais, sem alteração)
 # ---------------------------
 def enviar_comando_redirecionar(worker_id, worker_info, target_ip, target_port):
     payload = {"TASK": "REDIRECT", "SERVER_REDIRECT": {"ip": target_ip, "port": target_port}}
@@ -464,20 +463,20 @@ def monitorar_known_masters():
 # ---------------------------
 # SERVIDOR TCP PRINCIPAL
 # ---------------------------
-def iniciar_servidor_master():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((HOST, PORT))
-    s.listen(20)
-    logger.info(f"🚀 [SERVER] Master {MASTER_UUID} escutando em {HOST}:{PORT}")
-    try:
-        while True:
-            conn, addr = s.accept()
-            threading.Thread(target=tratar_cliente, args=(conn, addr), daemon=True).start()
-    except Exception as e:
-        logger.error(f"🔴 [SERVER] erro no loop principal: {e}")
-    finally:
-        s.close()
+# def iniciar_servidor_master():
+#     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+#     s.bind((HOST, PORT))
+#     s.listen(20)
+#     logger.info(f"🚀 [SERVER] Master {MASTER_UUID} escutando em {HOST}:{PORT}")
+#     try:
+#         while True:
+#             conn, addr = s.accept()
+#             threading.Thread(target=tratar_cliente, args=(conn, addr), daemon=True).start()
+#     except Exception as e:
+#         logger.error(f"🔴 [SERVER] erro no loop principal: {e}")
+#     finally:
+#         s.close()
 
 # ---------------------------
 # --- NOVAS FUNÇÕES ADICIONADAS: montagem/enfileiramento/envio das métricas (sem alterar estrutura)
@@ -580,9 +579,8 @@ def coletar_metricas_master():
                     "free_gb": disk_free_gb,
                     "percent_used": disk_percent_used
                 }
-            }
-        },
-        "farm_state": {
+            },
+             "farm_state": {
             "workers": {
                 "total_registered": total_registered,
                 "workers_utilization": workers_utilization,
@@ -600,7 +598,9 @@ def coletar_metricas_master():
         "config_thresholds": {
             "max_task": THRESHOLD
         },
-        "neighbors": neighbors_list
+        "neighbors": neighbors_list,
+        },
+       
     }
 
     return payload
